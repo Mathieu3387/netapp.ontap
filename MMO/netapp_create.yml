@@ -1,0 +1,391 @@
+- hosts: localhost
+  collections: 
+    - netapp.ontap
+
+  vars_files:
+    - "{{provider_config_path}}/{{ current_env }}/vault.yml"
+    - "{{provider_config_path}}/{{ current_env }}/hashicorp_vault.yml"
+    - "{{provider_config_path}}/{{ current_env }}/storage/nas.yml"
+  
+  vars:
+
+  ############################################
+  ############     DEBUG     #################
+  ############################################
+    # form_client: MMG
+    # form_ip: "10...32"
+    # form_vlan: 1058
+    # form_sub: "10...0/24"
+    # form_gw: "10...254"
+    # form_protocol: cifs
+    # form_mtu: 9000
+    # form_vol_size: 5120
+    # form_share: share
+    # form_target: "10...14" #séparé par des virgules
+    # form_dns_domain: "MMG.LAN"
+    # form_dns_nameservers: "10...4,10...5"
+    # form_nas_name: "NASCHEOPS"
+    # domain_login: "adm-cheops"
+    # domain_pwd: "FalsePassWord%"
+    # form_bkp: true
+  ############################################
+  ###########   ///DEBUG\\\     ##############
+  ############################################
+
+    rl_svm: "svm_{{ form_client }}_1"
+    rl_broadcast_domain: "{{ form_client }}_bd_{{ form_vlan }}"
+    rl_subnet: "{{ form_client }}_sb_{{ form_vlan }}"
+    itf_list: 
+      - e0c
+      - e0f
+
+    login: &login
+      username: "{{ pr_netapp_username }}" #admin
+      password: "{{ pr_netapp_password }}"
+      hostname: "srv1-nas-1..cheops.fr"
+      https: true
+      validate_certs: false
+    login_pair: &login_pair
+      username: "{{ pr_netapp_username }}" #admin
+      password: "{{ pr_netapp_password }}"
+      hostname: "SRV-nas-1...cheops.fr"
+      https: true
+      validate_certs: false
+
+
+  tasks:
+
+    ############################################
+    ############################################  
+    - block:
+      - name: NETAPP Cluster Node Info
+        na_ontap_info:
+          <<: *login
+          gather_subset:
+            - "cluster_node_info"
+        register: cluster_facts
+
+      - name: NETAPP Cluster Node Info NETCENTER
+        na_ontap_info:
+          <<: *login_pair
+          gather_subset:
+            - "cluster_node_info"
+        register: cluster_facts_pair
+    ############################################
+    ############################################  
+
+
+    ############################################
+    ############################################  
+    - block:
+      - name: create VLAN
+        na_ontap_net_vlan:
+          state: present
+          vlanid: "{{ form_vlan }}"
+          node: "{{ item[0] }}"
+          parent_interface: "{{ item[1] }}"
+          <<: *login
+        loop: "{{ cluster_facts.ontap_info.cluster_node_info | product( itf_list ) | list }}"
+
+      - name: create VLAN NETCENTER
+        na_ontap_net_vlan:
+          state: present
+          vlanid: "{{ form_vlan }}"
+          node: "{{ item[0] }}"
+          parent_interface: "{{ item[1] }}"
+          <<: *login_pair
+        loop: "{{ cluster_facts_pair.ontap_info.cluster_node_info | product( itf_list ) | list }}"
+    ############################################
+    ############################################  
+
+
+    ############################################
+    ############################################  
+    - block:
+      - name: NETAPP Ethernet Ports Info
+        na_ontap_info:
+          <<: *login
+          gather_subset:
+            - "net_port_info"
+        register: eth_facts
+
+      - name: NETAPP Ethernet Ports Info NETCENTER
+        na_ontap_info:
+          <<: *login_pair
+          gather_subset:
+            - "net_port_info"
+        register: eth_facts_pair
+    ############################################
+    ############################################  
+
+
+    ############################################
+    ############################################
+    - block:
+      - name: Create Broadcast Domain
+        na_ontap_broadcast_domain:
+          state: present
+          name: "{{ rl_broadcast_domain }}"
+          mtu: "{{ form_mtu }}"
+          ports: "{{ eth_facts.ontap_info.net_port_info | list | select('match', '.*:*' ~ form_vlan  ) | join(',') }}"
+          <<: *login
+
+      - name: Create Broadcast Domain NETCENTER
+        na_ontap_broadcast_domain:
+          state: present
+          name: "{{ rl_broadcast_domain }}"
+          mtu: "{{ form_mtu }}"
+          ports: "{{ eth_facts_pair.ontap_info.net_port_info | list | select('match', '.*:*' ~ form_vlan  ) | join(',') }}"
+          <<: *login_pair
+    ############################################
+    ############################################
+
+
+    ############################################
+    ############################################
+    - block:
+      - name: Create Subnet
+        na_ontap_net_subnet:
+          state: present
+          broadcast_domain: "{{ rl_broadcast_domain }}"
+          name: "{{ rl_subnet }}"
+          subnet: "{{ form_sub }}"
+          gateway: "{{ form_gw }}"
+          ip_ranges: "{{ form_ip }}"
+          <<: *login
+
+      - name: Create Subnet NETCENTER
+        na_ontap_net_subnet:
+          state: present
+          broadcast_domain: "{{ rl_broadcast_domain }}"
+          name: "{{ rl_subnet }}"
+          subnet: "{{ form_sub }}"
+          gateway: "{{ form_gw }}"
+          ip_ranges: "{{ form_ip }}"
+          <<: *login_pair
+    ############################################
+    ############################################
+
+
+    ############################################
+    ############################################
+    - block:
+      - name: Create SVM
+        na_ontap_svm:
+          state: present
+          name: "{{ rl_svm }}"
+          subtype: default
+          root_volume: "{{ rl_svm }}_root"
+          root_volume_security_style: mixed
+          allowed_protocols: nfs,cifs
+          <<: *login
+    #################################################
+    #################################################
+
+
+    #################################################
+    #################################################
+    - block:
+      - name: Create LIF
+        na_ontap_interface:
+          state: present
+          interface_name: "{{ rl_svm }}_{{ form_protocol }}"
+          role: data
+          protocols: "{{ form_protocol }}"
+          vserver: "{{ rl_svm }}"
+          subnet_name: "{{ rl_subnet }}"
+          home_port: "e0c-{{ form_vlan }}"
+          home_node: ICDC20-NAS-1_1
+          is_auto_revert: True
+          <<: *login
+    #################################################
+    #################################################
+
+
+    #################################################
+    #################################################
+    # Création du peering entre les vServer
+    - block:
+      - name: Create SVM NETCENTER
+        na_ontap_svm:
+          state: present
+          name: "{{ rl_svm }}_pra"
+          subtype: dp_destination
+          <<: *login_pair
+
+      - name: Create vServer Peer
+        na_ontap_vserver_peer:
+          state: present
+          peer_vserver: "{{ rl_svm }}"
+          peer_cluster: "ICDC20-NAS-1"
+          vserver: "{{ rl_svm }}_pra"
+          applications: ['snapmirror']
+          <<: *login_pair
+          peer_options:
+            <<: *login
+
+      # Création de la relation DR des volumes
+      - name: Create SnapMirror relationship
+        na_ontap_snapmirror:
+          state: present
+          source_path: "{{ rl_svm + ':' }}"
+          destination_path: "{{ rl_svm + '_pra' + ':' }}"
+          policy: "ICOD_MirrorAndVault"
+          identity_preserve: True
+          schedule: "5min"
+          <<: *login_pair
+    #################################################
+    #################################################
+
+
+
+    #################################################
+    #################################################
+    - block:
+      # Creation de l'export policy
+      - name: Create Export Policy
+        na_ontap_export_policy:
+          state: present
+          name: "pol_{{ form_protocol }}"
+          vserver: "{{ rl_svm }}"
+          <<: *login
+
+      # Modification des règles des export policy
+      # Export policy Default
+      - name: Modify Default Export Policy
+        na_ontap_export_policy_rule:
+          state: present
+          name: default
+          vserver: "{{ rl_svm }}"
+          client_match: "0.0.0.0/0"
+          ro_rule: any
+          rw_rule: never
+          super_user_security: none
+          <<: *login
+
+      # Export policy Client
+      - name: Modify {{ form_protocol }} Export Policy
+        na_ontap_export_policy_rule:
+          state: present
+          name: "pol_{{ form_protocol }}"
+          vserver: "{{ rl_svm }}"
+          client_match: "{{ form_target }}"
+          ro_rule: any
+          rw_rule: any
+          protocol: "{{ form_protocol }}"
+          super_user_security: any
+          <<: *login
+    #################################################
+    #################################################
+
+
+    #################################################
+    #################################################
+    - block:
+      # Création de la règle de QOS
+      - name: Create QOS
+        na_ontap_qos_adaptive_policy_group:
+          state: present
+          name: "{{ form_client }}_IOPS_550"
+          vserver: "{{ rl_svm }}"
+          expected_iops: "550IOPS/TB"
+          peak_iops: "1000IOPS/TB"
+          absolute_min_iops: "550IOPS/TB"
+          <<: *login
+    #################################################
+    #################################################
+
+
+    #################################################
+    #################################################
+    - block:
+      # Création du volume
+      - name: Create Volume
+        na_ontap_volume:
+          state: present
+          name: "{{ form_client }}_{{ form_protocol | upper }}_data"
+          vserver: "{{ rl_svm }}"
+          aggregate_name: aggr1_ICDC20_NAS_1_1_data1
+          size: "{{ form_vol_size }}"
+          export_policy: "pol_{{ form_protocol }}"
+          junction_path: "/{{ form_client }}_{{ form_protocol | upper }}_data"
+          snapshot_policy: ICOD_Backup_Vault
+          space_guarantee: none
+          volume_security_style: "{%- if form_protocol=='cifs' -%}ntfs
+          {%- elif form_protocol=='nfs' -%}unix
+          {%- endif -%}"
+          percent_snapshot_space: 5
+          qos_adaptive_policy_group: "{{ form_client }}_IOPS_550"
+          <<: *login
+    #################################################
+    #################################################
+
+
+    #################################################
+    #################################################
+    - block:
+      #### Configuration DNS  
+      - name: Create DNS
+        na_ontap_dns:
+          state: present
+          vserver:  "{{ rl_svm }}"
+          domains: "{{ form_dns_domain }}"
+          nameservers: "{{ form_dns_nameservers }}"
+          skip_validation: true
+          <<: *login
+    #################################################
+    #################################################
+
+
+    #################################################
+    #################################################
+    - block:
+        # Configuration NFS
+        - name: Enable NFS Server
+          na_ontap_nfs:
+            state: present
+            nfsv3: enabled
+            vserver: "{{ rl_svm }}"
+            service_state: started
+            <<: *login
+      when: form_protocol == 'nfs'
+
+    - block:
+        # Configuration CIFS
+        - name: Create CIFS SERVER
+          na_ontap_cifs_server:
+            state: present
+            name: "{{ form_nas_name }}"
+            vserver: "{{ rl_svm }}"
+            service_state: started
+            domain: "{{ form_dns_domain }}"
+            admin_user_name: "{{ domain_login }}"
+            admin_password: "{{ domain_pwd }}"
+            <<: *login
+
+        # Création du QTree
+        - name: Create Qtree
+          na_ontap_qtree:
+            state: present
+            name: "{{ form_share }}"
+            flexvol_name: "{{ form_client }}_{{ form_protocol | upper }}_data"
+            export_policy: "pol_{{ form_protocol }}"
+            oplocks: disabled
+            vserver: "{{ rl_svm }}"
+            <<: *login
+
+        # Création du Share CIFS
+        - name: Configure CIFS share
+          na_ontap_cifs:
+            state: present
+            vserver:  "{{ rl_svm }}"
+            share_name: "{{ form_share }}"
+            path: "/{{ form_client }}_{{ form_protocol | upper }}_data/{{ form_share }}"
+            <<: *login
+
+      when: form_protocol == "cifs"
+    #################################################
+    #################################################
+
+    - meta: end_play
+
